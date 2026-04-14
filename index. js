@@ -1,0 +1,48 @@
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys')
+const pino = require('pino')
+const axios = require('axios')
+
+async function startBot() {
+    const { state, saveCreds } = await useMultiFileAuthState('sesi')
+    const sock = makeWASocket({
+        logger: pino({ level: 'silent' }),
+        auth: state,
+        browser: ['Bot WA', 'Chrome', '1.0.0']
+    })
+
+    sock.ev.on('creds.update', saveCreds)
+
+    sock.ev.on('connection.update', (update) => {
+        const { connection, lastDisconnect } = update
+        if(connection === 'close') {
+            const shouldReconnect = lastDisconnect.error?.output?.statusCode!== DisconnectReason.loggedOut
+            if(shouldReconnect) startBot()
+        } else if(connection === 'open') {
+            console.log('Bot konek!')
+        }
+    })
+
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+        const msg = messages[0]
+        if (!msg.message || msg.key.fromMe) return
+
+        const text = msg.message.conversation || msg.message.extendedTextMessage?.text || ''
+        if (!text) return
+
+        try {
+            const groq = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+                model: 'llama3-8b-8192',
+                messages: [{ role: 'user', content: text }]
+            }, {
+                headers: { 'Authorization': `Bearer ${process.env.GROQ_API_KEY}` }
+            })
+
+            const reply = groq.data.choices[0].message.content
+            await sock.sendMessage(msg.key.remoteJid, { text: reply })
+        } catch (e) {
+            console.log('Error AI:', e.message)
+        }
+    })
+}
+
+startBot()
